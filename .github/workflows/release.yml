@@ -69,17 +69,19 @@ jobs:
           name: dist
           path: dist/
 
-      # For OIDC trusted publishing, setup-node must NOT write an _authToken
-      # line into .npmrc (even a blank one causes "token expired" errors).
-      # We configure the registry URL separately via npm config so that
-      # `npm publish --provenance` can exchange the GitHub OIDC token itself.
+      # For OIDC trusted publishing, setup-node must NOT leave an _authToken
+      # entry in .npmrc (even an empty one causes "token expired" errors).
+      # We let setup-node configure the registry endpoint, then immediately
+      # delete the auth line it writes so npm falls through to the OIDC
+      # exchange driven by id-token:write + --provenance.
       - name: Setup Node.js (npm publish)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
 
-      - name: Configure npm registry
-        run: npm config set registry https://registry.npmjs.org/
+      - name: Remove auth token for OIDC trusted publishing
+        run: npm config delete //registry.npmjs.org/:_authToken
 
       # Stamp the version from the tag (strips the leading "v")
       - name: Set package version from tag
