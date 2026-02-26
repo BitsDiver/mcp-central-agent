@@ -1,6 +1,6 @@
 {
     "name": "mcp-central-agent",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Local agent that tunnels private MCP servers to MCP Central",
     "author": "BitsDiver",
     "license": "MIT",
