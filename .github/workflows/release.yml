@@ -80,9 +80,6 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Remove auth token for OIDC trusted publishing
-        run: npm config delete //registry.npmjs.org/:_authToken
-
       # Stamp the version from the tag (strips the leading "v")
       - name: Set package version from tag
         run: |
