@@ -1,0 +1,298 @@
+# mcp-central-agent — Project Context for AI-Assisted Development
+
+## Project Overview
+
+`mcp-central-agent` is a **lightweight CLI daemon** that bridges private, local
+MCP servers — stdio processes, localhost HTTP endpoints, or LAN addresses — to a
+remote [MCP Central](https://github.com/BitsDiver/mcp-central) proxy via an
+outbound Socket.IO tunnel.
+
+**Problem it solves:** MCP Central runs in the cloud and can only reach
+publicly-addressable MCP servers. `mcp-central-agent` runs on the developer's
+own machine, establishes an *outbound-only* persistent WebSocket connection to
+MCP Central, and transparently forwards tool calls to private servers (e.g.
+`npx @modelcontextprotocol/server-filesystem`) that MCP Central could not reach
+directly.
+
+### Key properties
+
+- **No inbound ports required** — the tunnel is always agent → server.
+- **Auto-reconnect** — both the Socket.IO tunnel and individual local MCP
+  clients retry indefinitely with exponential back-off.
+- **Dynamic endpoint management** — endpoints are pushed from the MCP Central
+  UI in real-time; the agent starts/stops local MCP clients accordingly.
+- **Publishable as an npm / GitHub Packages package** — users run it with
+  `npx mcp-central-agent start --config mcp-agent.json`.
+
+---
+
+## Tech Stack
+
+| Concern            | Technology                                           |
+| ------------------ | ---------------------------------------------------- |
+| Runtime            | Node.js ≥ 18 (ESM)                                   |
+| Language           | TypeScript 5.x (strict, `NodeNext` module resolution)|
+| MCP client         | `@modelcontextprotocol/sdk` v1.x                     |
+| Tunnel transport   | `socket.io-client` v4 (`/agent-tunnel` namespace)    |
+| CLI framework      | `commander` v12                                      |
+| Config validation  | `zod` v3                                             |
+| Build              | `tsc` (output to `dist/`)                            |
+| Package managers   | npm (primary), compatible with pnpm / yarn           |
+| CI / Publishing    | GitHub Actions (`release.yml`) → npm + GitHub Packages|
+
+---
+
+## Architecture
+
+```
+mcp-agent.json (config)
+        │
+        ▼
+┌───────────────────────────────────────────────────────┐
+│  McpCentralAgent  (agent.ts)                          │
+│                                                       │
+│   ┌─────────────────────────────────────────────┐     │
+│   │  AgentTunnel  (tunnel.ts)                   │     │
+│   │                                             │     │
+│   │  Socket.IO ──► MCP Central /agent-tunnel    │     │
+│   │                                             │     │
+│   │  Receives:  agent:endpoints (initial list)  │     │
+│   │             agent:endpoint_add/remove       │     │
+│   │             agent:endpoint_toggle/update    │     │
+│   │             agent:endpoint_refresh          │     │
+│   │             agent:tool_call                 │     │
+│   │                                             │     │
+│   │  Sends:     agent:tools_announced           │     │
+│   │             agent:status_update             │     │
+│   │             agent:tool_result               │     │
+│   └─────────────────────────────────────────────┘     │
+│                                                       │
+│   Map<endpointId, LocalClient>                        │
+│   ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ │
+│   │ LocalClient  │ │ LocalClient  │ │ LocalClient  │ │
+│   │ (stdio)      │ │ (http)       │ │ (sse)        │ │
+│   │  @mcp/sdk    │ │  @mcp/sdk    │ │  @mcp/sdk    │ │
+│   └──────────────┘ └──────────────┘ └──────────────┘ │
+└───────────────────────────────────────────────────────┘
+```
+
+### Data flow — tool call
+
+```
+MCP Central backend
+  └─► agent:tool_call { callId, endpointId, toolName, args }
+        └─► McpCentralAgent._handleToolCall()
+              └─► LocalClient.callTool(toolName, args)
+                    └─► MCP SDK client.callTool()
+                          └─► local MCP server process / HTTP
+                    ◄─── tool result (JSON)
+              └─► AgentTunnel.sendToolResult(callId, result | error)
+                    └─► socket.emit("agent:tool_result", …)
+  ◄─── MCP Central backend receives result
+```
+
+---
+
+## Source Structure
+
+```
+src/
+├── index.ts        — Public API re-exports (for programmatic use as a library)
+├── cli.ts          — CLI entry point (#!/usr/bin/env node)
+│                     Commands: init, start
+├── config.ts       — Zod schema (AgentConfigSchema) + loadConfig() file loader
+├── agent.ts        — McpCentralAgent: orchestrates tunnel + LocalClient pool
+├── tunnel.ts       — AgentTunnel: Socket.IO /agent-tunnel connection,
+│                     sends/receives all tunnel protocol events
+└── local-client.ts — LocalClient: one MCP SDK client per endpoint,
+                      handles connect/reconnect/tool-call for stdio, HTTP, SSE
+```
+
+### `cli.ts` — CLI commands
+
+| Command | Description |
+| ------- | ----------- |
+| `init [--output <path>]` | Interactive prompt → writes `mcp-agent.json` |
+| `start [--config <path>]` | Loads config, creates `McpCentralAgent`, starts tunnel |
+
+Both commands are exposed under the binary name `mcp-central-agent` (see
+`package.json#bin`).
+
+### `config.ts` — Config schema
+
+```typescript
+AgentConfigSchema = z.object({
+  serverUrl: z.string().url(),   // base URL of MCP Central (no trailing slash)
+  agentName: z.string().min(1),  // must match the agent name in the UI
+  apiKey: z.string().startsWith("agent_"),
+})
+```
+
+Config is loaded from a JSON file (default: `mcp-agent.json` in CWD).
+The file must **never** be committed — it's in `.gitignore`.
+
+### `agent.ts` — `McpCentralAgent`
+
+Central orchestrator. Holds:
+- One `AgentTunnel` instance (Socket.IO connection to MCP Central).
+- A `Map<endpointId, LocalClient>` — one entry per active upstream endpoint.
+
+Responds to tunnel events by adding/removing/updating `LocalClient` instances.
+Forwards tool calls from the tunnel to the correct `LocalClient`.
+
+### `tunnel.ts` — `AgentTunnel`
+
+Manages the Socket.IO connection to `{serverUrl}/agent-tunnel`.
+
+Authentication: `{ auth: { apiKey } }` in the Socket.IO handshake options.
+
+**Server → Agent events:**
+
+| Event | Payload | Description |
+| ----- | ------- | ----------- |
+| `agent:endpoints` | `EndpointConfig[]` | Full endpoint list on connect |
+| `agent:endpoint_add` | `EndpointConfig` | New endpoint assigned to this agent |
+| `agent:endpoint_remove` | `{ endpointId }` | Endpoint removed |
+| `agent:endpoint_toggle` | `{ endpointId, isEnabled }` | Enable/disable |
+| `agent:endpoint_update` | `EndpointConfig` | Config changed |
+| `agent:endpoint_refresh` | `{ endpointId }` | Re-announce tools |
+| `agent:tool_call` | `ToolCallPayload` | Incoming tool call to execute |
+
+**Agent → Server events:**
+
+| Event | Payload | Description |
+| ----- | ------- | ----------- |
+| `agent:tools_announced` | `{ endpointId, tools }` | Tools discovered from local server |
+| `agent:status_update` | `{ endpointId, status, error? }` | Connection status change |
+| `agent:tool_result` | `{ callId, result?, error? }` | Tool call response |
+
+Reconnection: unlimited retries, exponential back-off 1 s → 30 s.
+
+### `local-client.ts` — `LocalClient`
+
+One instance per active endpoint. Wraps `@modelcontextprotocol/sdk`'s `Client`
+class with:
+- Transport selection based on `EndpointConfig.transport`:
+  - `stdio` → `StdioClientTransport` (spawns the command)
+  - `streamable-http` → `StreamableHTTPClientTransport`
+  - `sse` → `SSEClientTransport`
+- Auto-reconnect with delays `[1s, 2s, 5s, 10s, 30s]` (max 60 s).
+- Tool discovery on connect → fires `onToolsChanged` callback.
+- Clean shutdown via `disconnect()` (cancels timers, closes MCP client).
+
+---
+
+## Tunnel Protocol — `EndpointConfig`
+
+```typescript
+interface EndpointConfig {
+  id: string;
+  name: string;
+  namespace: string;
+  transport: "stdio" | "streamable-http" | "sse";
+  url: string | null;       // used for streamable-http / sse
+  command: string | null;   // used for stdio
+  args: string[];
+  env: Record<string, string>;
+  headers: Record<string, string>;
+  isEnabled: boolean;
+}
+```
+
+---
+
+## CLI Usage
+
+```bash
+# First run — create config interactively
+npx mcp-central-agent init
+# => writes mcp-agent.json
+
+# Start the agent (default config path: ./mcp-agent.json)
+npx mcp-central-agent start
+
+# Use a custom config location
+npx mcp-central-agent start --config /etc/mcp/prod-agent.json
+```
+
+---
+
+## Publishing / Release
+
+The CI pipeline is defined in `.github/workflows/release.yml`.
+
+**Trigger:** push of a semver tag (e.g. `v1.2.3` or `v1.0.0-beta.1`).
+
+**Jobs:**
+
+1. **build** — `npm ci` + `tsc`. Uploads `dist/` as a GitHub Actions artifact.
+2. **publish-npm** — publishes unscoped package `mcp-central-agent` to
+   [npmjs.com](https://www.npmjs.com/package/mcp-central-agent).
+   Requires repository secret `NPM_TOKEN`.
+3. **publish-gpr** — publishes scoped package `@bitsdiver/mcp-central-agent`
+   to GitHub Packages. Uses the automatic `GITHUB_TOKEN`.
+4. **github-release** — creates a GitHub Release; marks it as pre-release when
+   the tag contains `-` (e.g. `v1.0.0-beta.1`).
+
+**To release a new version:**
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+---
+
+## Development Rules
+
+### TypeScript
+
+- Strict mode is enforced (`"strict": true`).
+- Module format: `"type": "module"` + `"module": "NodeNext"` — all imports
+  **must** use `.js` extensions (they resolve to `.ts` during development, `.js`
+  in the compiled output).  
+  ✅ `import { loadConfig } from "./config.js"`  
+  ❌ `import { loadConfig } from "./config"`
+- No `any`. Use explicit types or `unknown` + type guards.
+- `async/await` everywhere — no raw `.then()` chains.
+
+### Error handling
+
+- User-facing errors are always printed to stderr via `console.error` and the
+  process exits with code `1`.
+- Internal errors inside `LocalClient` and `AgentTunnel` are logged and trigger
+  the reconnect logic — they must not crash the process.
+
+### Logging
+
+Use `console.log` / `console.warn` / `console.error` with a bracketed prefix
+matching the class name:
+
+```typescript
+console.log("[AgentTunnel] Connected to …");
+console.error("[LocalClient] Failed to connect 'github': …");
+```
+
+No external logging library is used.
+
+### Adding a new transport
+
+1. Add the new transport type to `EndpointConfig.transport` (union).
+2. Add the corresponding branch in `LocalClient._createTransport()`.
+3. Update the `README.md` Supported Transports table.
+
+### Adding a new tunnel event
+
+1. Define the payload type in `tunnel.ts`.
+2. Add the `socket.on(…)` listener in `AgentTunnel.connect()`.
+3. Add the corresponding callback to `TunnelCallbacks`.
+4. Implement the handler in `McpCentralAgent`.
+5. Update the event tables in this file and in the `README.md`.
+
+---
+
+## Related Projects
+
+| Project | Description |
+| ------- | ----------- |
+| [mcp-central](https://github.com/BitsDiver/mcp-central) | Backend: Bun + Fastify, PostgreSQL, Socket.IO services, `AgentTunnelService`, `AgentManager` |
+| [mcp-central-app](https://github.com/BitsDiver/mcp-central-app) | Frontend SPA: Vue 3 + Vite, agent management UI in `EndpointsView` |

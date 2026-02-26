@@ -1,0 +1,158 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# release.yml — Build, publish to npm + GitHub Packages, and create a release.
+#
+# Trigger: push of a semver tag  →  git tag v1.2.3 && git push --tags
+#
+# Required repository secrets:
+#   NPM_TOKEN   — npm access token with "Automation" publish permission
+#
+# GITHUB_TOKEN is provided automatically by GitHub Actions.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'   # pre-release tags: v1.0.0-beta.1
+
+permissions:
+  contents: write      # create GitHub release
+  packages: write      # publish to GitHub Packages
+  id-token: write      # provenance attestation (npm)
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      # Save dist/ for subsequent publish jobs
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  publish-npm:
+    name: Publish → npm
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Restore the compiled output from the build job
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Configure npm registry + inject NODE_AUTH_TOKEN into .npmrc
+      - name: Setup Node.js (npm registry)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Stamp the version from the tag (strips the leading "v")
+      - name: Set package version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm pkg set version="$VERSION"
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-gpr:
+    name: Publish → GitHub Packages
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # GitHub Packages (npm) requires a scoped package name (@owner/pkg)
+      - name: Setup Node.js (GitHub Packages registry)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+
+      - name: Set package name + version for GitHub Packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm pkg set name="@bitsdiver/mcp-central-agent"
+          npm pkg set version="$VERSION"
+
+      - name: Publish to GitHub Packages
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  github-release:
+    name: Create GitHub Release
+    needs: [publish-npm, publish-gpr]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so we can diff the changelog
+
+      # Extract changelog section for this version (optional but nice)
+      - name: Extract release notes
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Try to grab the relevant section from CHANGELOG.md if it exists
+          if [[ -f CHANGELOG.md ]]; then
+            NOTES=$(awk "/^## \[?v?${VERSION}\]?/,/^## \[?v?[0-9]/" CHANGELOG.md \
+                    | head -n -1 | tail -n +2)
+          else
+            NOTES="Release ${GITHUB_REF_NAME}"
+          fi
+          # Store multi-line output safely
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.notes }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -1,0 +1,51 @@
+{
+    "name": "mcp-central-agent",
+    "version": "0.1.0",
+    "description": "Local agent that tunnels private MCP servers to MCP Central",
+    "author": "BitsDiver",
+    "license": "MIT",
+    "homepage": "https://github.com/BitsDiver/mcp-central-agent#readme",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/BitsDiver/mcp-central-agent.git"
+    },
+    "bugs": {
+        "url": "https://github.com/BitsDiver/mcp-central-agent/issues"
+    },
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "bin": {
+        "mcp-central-agent": "./dist/cli.js"
+    },
+    "files": [
+        "dist",
+        "README.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsc -w",
+        "start": "node dist/cli.js start",
+        "lint": "eslint src --ext .ts"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.10.0",
+        "commander": "^12.0.0",
+        "socket.io-client": "^4.8.0",
+        "zod": "^3.23.0"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "typescript": "^5.5.0"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "keywords": [
+        "mcp",
+        "model-context-protocol",
+        "agent",
+        "tunnel"
+    ]
+}
