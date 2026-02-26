@@ -31,10 +31,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -60,7 +60,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Restore the compiled output from the build job
       - name: Download dist artifact
@@ -75,7 +75,7 @@ jobs:
       # delete the auth line it writes so npm falls through to the OIDC
       # exchange driven by id-token:write + --provenance.
       - name: Setup Node.js (npm publish)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -90,7 +90,7 @@ jobs:
           npm pkg set version="$VERSION"
 
       - name: Publish to npm
-        run: npm publish --access public --provenance
+        run: NODE_AUTH_TOKEN="" npm publish --access public --provenance
 
   publish-gpr:
     name: Publish → GitHub Packages
@@ -99,7 +99,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download dist artifact
         uses: actions/download-artifact@v4
@@ -109,7 +109,7 @@ jobs:
 
       # GitHub Packages (npm) requires a scoped package name (@owner/pkg)
       - name: Setup Node.js (GitHub Packages registry)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           registry-url: 'https://npm.pkg.github.com'
@@ -132,7 +132,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0   # full history so we can diff the changelog
 
