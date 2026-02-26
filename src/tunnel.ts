@@ -2,6 +2,7 @@ import { io, type Socket } from "socket.io-client";
 import type { AgentConfig } from "./config.js";
 import type { EndpointConfig } from "./local-client.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { AGENT_VERSION } from "./version.js";
 
 // ── Tunnel protocol types ────────────────────────────────────────────────
 
@@ -39,7 +40,7 @@ export class AgentTunnel {
     const url = this._config.serverUrl.replace(/\/$/, "");
 
     this._socket = io(`${url}/agent-tunnel`, {
-      auth: { apiKey: this._config.apiKey },
+      auth: { apiKey: this._config.apiKey, version: AGENT_VERSION },
       transports: ["websocket"],
       reconnection: true,
       reconnectionDelay: 1_000,
@@ -49,6 +50,14 @@ export class AgentTunnel {
 
     this._socket.on("connect", () => {
       console.log(`[AgentTunnel] Connected to ${url}/agent-tunnel`);
+      // Emit join so AgentTunnelService registers the socket and pushes endpoints.
+      // IOServer wires public service methods as socket.on(method) handlers;
+      // the agent must explicitly emit this first event.
+      this._socket?.emit("join", {}, (ack: unknown) => {
+        if (ack && typeof ack === "object" && (ack as any).status === "error") {
+          console.error(`[AgentTunnel] join rejected:`, ack);
+        }
+      });
     });
 
     this._socket.on("disconnect", (reason) => {
@@ -66,10 +75,13 @@ export class AgentTunnel {
       this._callbacks.onEndpoints(endpoints);
     });
 
-    this._socket.on("agent:endpoint_add", (endpoint: EndpointConfig) => {
-      console.log(`[AgentTunnel] Endpoint added: ${endpoint.name}`);
-      this._callbacks.onEndpointAdd(endpoint);
-    });
+    this._socket.on(
+      "agent:endpoint_add",
+      ({ endpoint }: { endpoint: EndpointConfig }) => {
+        console.log(`[AgentTunnel] Endpoint added: ${endpoint.name}`);
+        this._callbacks.onEndpointAdd(endpoint);
+      },
+    );
 
     this._socket.on(
       "agent:endpoint_remove",
@@ -86,10 +98,13 @@ export class AgentTunnel {
       },
     );
 
-    this._socket.on("agent:endpoint_update", (endpoint: EndpointConfig) => {
-      console.log(`[AgentTunnel] Endpoint updated: ${endpoint.name}`);
-      this._callbacks.onEndpointUpdate(endpoint);
-    });
+    this._socket.on(
+      "agent:endpoint_update",
+      ({ endpoint }: { endpoint: EndpointConfig }) => {
+        console.log(`[AgentTunnel] Endpoint updated: ${endpoint.name}`);
+        this._callbacks.onEndpointUpdate(endpoint);
+      },
+    );
 
     this._socket.on(
       "agent:endpoint_refresh",

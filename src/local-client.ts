@@ -47,6 +47,7 @@ export class LocalClient {
   private _status: LocalClientStatus = "disconnected";
   private _tools: Tool[] = [];
   private _destroyed = false;
+  private _connecting = false;
   private _reconnectAttempt = 0;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly _callbacks: LocalClientCallbacks;
@@ -68,11 +69,11 @@ export class LocalClient {
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   async connect(): Promise<void> {
-    if (this._destroyed) return;
+    if (this._destroyed || this._connecting) return;
+    this._connecting = true;
     this._setStatus("connecting");
 
     try {
-      const transport = this._createTransport();
       const client = new Client(
         {
           name: `mcp-central-agent:${this.config.namespace}`,
@@ -81,7 +82,20 @@ export class LocalClient {
         { capabilities: { roots: {}, sampling: {} } },
       );
 
-      await client.connect(transport);
+      // For HTTP endpoints: try Streamable HTTP (POST) first, fall back to
+      // SSE (GET) if the POST handshake fails — mirrors the backend's
+      // UpstreamClient.connectHttp() so the choice is transparent to users.
+      let transport:
+        | StdioClientTransport
+        | StreamableHTTPClientTransport
+        | SSEClientTransport;
+      if (this.config.transport === "streamable-http") {
+        transport = await this._connectHttp(client);
+      } else {
+        transport = this._createTransport();
+        await client.connect(transport);
+      }
+
       this._client = client;
       this._reconnectAttempt = 0;
 
@@ -91,19 +105,45 @@ export class LocalClient {
       this._setStatus("connected");
       this._callbacks.onToolsChanged(this._tools);
 
-      // Watch for transport close to trigger reconnect
-      transport.onclose = () => {
-        if (!this._destroyed) {
+      // Watch for server-side drops.
+      // onerror fires when the remote end closes the connection mid-session
+      // (ECONNRESET, ECONNREFUSED after restart, etc.) — this is the primary
+      // signal for SSE and Streamable-HTTP transports.
+      // onclose fires on an explicit transport.close() call.
+      // Both must be hooked, mirroring UpstreamClient._hookTransportClose().
+      // One-shot wrappers prevent double-scheduling if both fire together.
+      const _onError = (err: Error) => {
+        (transport as any).onerror = undefined;
+        if (!this._destroyed && this._status === "connected") {
+          console.warn(
+            `[LocalClient] ${this.config.name}: transport error — ${err?.message ?? err}`,
+          );
+          this._tools = [];
+          this._setStatus("error", err?.message ?? "Transport error");
+          this._scheduleReconnect();
+        }
+      };
+      const _onClose = () => {
+        (transport as any).onclose = undefined;
+        if (!this._destroyed && this._status === "connected") {
+          console.warn(
+            `[LocalClient] ${this.config.name}: transport closed unexpectedly`,
+          );
+          this._tools = [];
           this._setStatus("error", "Transport closed unexpectedly");
           this._scheduleReconnect();
         }
       };
+      (transport as any).onerror = _onError;
+      transport.onclose = _onClose;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this._setStatus("error", message);
       if (!this._destroyed) {
         this._scheduleReconnect();
       }
+    } finally {
+      this._connecting = false;
     }
   }
 
@@ -179,6 +219,61 @@ export class LocalClient {
     throw new Error(
       `Unsupported transport '${transport}' for endpoint ${this.endpointId}`,
     );
+  }
+
+  /**
+   * Attempts Streamable HTTP (POST) first; falls back to SSE (GET) on failure.
+   * Mirrors the logic in the backend's UpstreamClient.connectHttp().
+   *
+   * Some MCP server providers only expose a GET/SSE endpoint while others use
+   * the newer Streamable HTTP POST protocol — this makes both work transparently.
+   */
+  private async _connectHttp(
+    client: Client,
+  ): Promise<StreamableHTTPClientTransport | SSEClientTransport> {
+    const { url, headers } = this.config;
+    if (!url)
+      throw new Error(`streamable-http endpoint ${this.endpointId} has no URL`);
+
+    const parsedUrl = new URL(url);
+    const reqInit = { headers: headers as HeadersInit };
+
+    // ── Attempt 1: Streamable HTTP (POST) ──────────────────
+    const streamableTransport = new StreamableHTTPClientTransport(parsedUrl, {
+      requestInit: reqInit,
+    });
+    try {
+      await client.connect(streamableTransport);
+      console.log(
+        `[LocalClient] ${this.config.name}: connected via Streamable HTTP (POST)`,
+      );
+      return streamableTransport;
+    } catch {
+      // Explicitly close the transport so its underlying fetch/socket is
+      // aborted. client.close() alone may not reach the transport if
+      // connect() threw before the SDK registered the transport internally.
+      streamableTransport.close().catch(() => {});
+      await client.close().catch(() => {});
+    }
+
+    // ── Attempt 2: SSE (GET) fallback ──────────────────────
+    console.log(
+      `[LocalClient] ${this.config.name}: Streamable HTTP failed, retrying via SSE (GET)…`,
+    );
+    const sseTransport = new SSEClientTransport(parsedUrl, {
+      requestInit: reqInit,
+    });
+    try {
+      await client.connect(sseTransport);
+      console.log(`[LocalClient] ${this.config.name}: connected via SSE (GET)`);
+      return sseTransport;
+    } catch (err) {
+      // Same cleanup — abort the dangling fetch so it doesn't fire when the
+      // server eventually comes back up.
+      sseTransport.close().catch(() => {});
+      await client.close().catch(() => {});
+      throw err;
+    }
   }
 
   private _setStatus(status: LocalClientStatus, error?: string): void {

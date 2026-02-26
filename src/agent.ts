@@ -134,6 +134,10 @@ export class McpCentralAgent {
   private _refreshEndpoint(endpointId: string): void {
     const client = this._clients.get(endpointId);
     if (client) {
+      // If the client is still in its initial connecting phase (triggered by
+      // the agent:endpoints push that fires just before onAgentConnected),
+      // skip the refresh — it would create a redundant duplicate connection.
+      if (client.status === "connecting") return;
       // Reconnect
       client.disconnect().catch(() => {});
       this._clients.delete(endpointId);
