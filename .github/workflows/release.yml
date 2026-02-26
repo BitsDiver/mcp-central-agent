@@ -3,8 +3,10 @@
 #
 # Trigger: push of a semver tag  →  git tag v1.2.3 && git push --tags
 #
-# Required repository secrets:
-#   NPM_TOKEN   — npm access token with "Automation" publish permission
+# npm authentication: Trusted Publisher (OIDC) — no NPM_TOKEN secret required.
+#   Configure on npmjs.com: package → Settings → Publishing → Trusted Publishers
+#   → Add GitHub Actions publisher (owner, repo, workflow: release.yml).
+#   The id-token: write permission below provides the OIDC token automatically.
 #
 # GITHUB_TOKEN is provided automatically by GitHub Actions.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -82,8 +84,6 @@ jobs:
 
       - name: Publish to npm
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-gpr:
     name: Publish → GitHub Packages
